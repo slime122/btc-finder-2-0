@@ -14,6 +14,8 @@ import numpy as np
 
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 DEFAULT_KERNEL_PATH = Path(__file__).resolve().parent.parent / "kernels" / "secp256k1.cl"
+DEFAULT_BATCH_SIZE = 4_096
+INTEL_INTEGRATED_GPU_BATCH_SIZE = 256
 
 
 class OpenCLScannerError(RuntimeError):
@@ -64,20 +66,30 @@ class OpenCLScanner:
         self,
         kernel_path: Path | str = DEFAULT_KERNEL_PATH,
         prefer_gpu: bool = True,
+        force_cpu: bool = False,
         platform_hint: Optional[str] = None,
         device_hint: Optional[str] = None,
-        local_size: int = 128,
+        local_size: Optional[int] = None,
     ) -> None:
         self.kernel_path = Path(kernel_path)
-        self.platform, self.device = self._select_device(prefer_gpu, platform_hint, device_hint)
-        self.local_size = min(local_size, int(self.device.max_work_group_size))
-        self.context = cl.Context([self.device])
-        self.queue = cl.CommandQueue(
-            self.context,
-            properties=cl.command_queue_properties.PROFILING_ENABLE,
-        )
-        self.program = self._build_program()
-        self.kernel = cl.Kernel(self.program, "scan_range")
+        try:
+            forced_type = cl.device_type.CPU if force_cpu else None
+            self.platform, self.device = self._select_device(
+                prefer_gpu=prefer_gpu,
+                platform_hint=platform_hint,
+                device_hint=device_hint,
+                forced_device_type=forced_type,
+            )
+            self.local_size = self._resolve_local_size(local_size)
+            self.context = cl.Context([self.device])
+            self.queue = cl.CommandQueue(
+                self.context,
+                properties=cl.command_queue_properties.PROFILING_ENABLE,
+            )
+            self.program = self._build_program()
+            self.kernel = cl.Kernel(self.program, "scan_range")
+        except (cl.RuntimeError, cl.MemoryError, cl.LogicError) as exc:
+            raise OpenCLScannerError(f"Failed to initialize OpenCL scanner: {exc}") from exc
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -89,6 +101,20 @@ class OpenCLScanner:
             global_mem_mb=self.device.global_mem_size // (1024 * 1024),
             max_work_group_size=self.device.max_work_group_size,
         )
+
+    @property
+    def safe_default_batch_size(self) -> int:
+        """Return a conservative default batch size for the selected device."""
+
+        name = self.device.name.lower()
+        platform = self.platform.name.lower()
+        is_gpu = bool(self.device.type & cl.device_type.GPU)
+        is_intel_integrated = is_gpu and "intel" in name and (
+            "iris" in name or "uhd" in name or "hd graphics" in name or platform == "apple"
+        )
+        if is_intel_integrated:
+            return INTEL_INTEGRATED_GPU_BATCH_SIZE
+        return DEFAULT_BATCH_SIZE
 
     @staticmethod
     def list_devices() -> list[DeviceInfo]:
@@ -126,20 +152,22 @@ class OpenCLScanner:
         target_hash160 = address_to_hash160(request.target_address)
         proof_hash160s = b"".join(address_to_hash160(address) for address in request.proof_addresses)
         max_keys = end_int - start_int + 1
-        batch_size = max(1, min(request.batch_size, max_keys))
-
-        target_hash_buf = cl.Buffer(
-            self.context,
-            cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR,
-            hostbuf=np.frombuffer(target_hash160, dtype=np.uint8),
-        )
-        proof_hash_buf = cl.Buffer(
-            self.context,
-            cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR,
-            hostbuf=np.frombuffer(proof_hash160s, dtype=np.uint8),
-        )
-        found_flags = cl_array.zeros(self.queue, 7, dtype=np.uint32)
-        found_keys = cl_array.zeros(self.queue, 7 * 8, dtype=np.uint32)
+        batch_size = max(1, min(request.batch_size or self.safe_default_batch_size, max_keys))
+        try:
+            target_hash_buf = cl.Buffer(
+                self.context,
+                cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR,
+                hostbuf=np.frombuffer(target_hash160, dtype=np.uint8),
+            )
+            proof_hash_buf = cl.Buffer(
+                self.context,
+                cl.mem_flags.READ_ONLY | cl.mem_flags.COPY_HOST_PTR,
+                hostbuf=np.frombuffer(proof_hash160s, dtype=np.uint8),
+            )
+            found_flags = cl_array.zeros(self.queue, 7, dtype=np.uint32)
+            found_keys = cl_array.zeros(self.queue, 7 * 8, dtype=np.uint32)
+        except (cl.RuntimeError, cl.MemoryError, cl.LogicError) as exc:
+            raise OpenCLScannerError(f"Failed to allocate OpenCL buffers: {exc}") from exc
 
         proof_map: dict[str, str] = {}
         target_private_key: Optional[str] = None
@@ -152,32 +180,42 @@ class OpenCLScanner:
 
             current = start_int + scanned
             current_batch = min(batch_size, max_keys - scanned)
-            global_size = _round_up(current_batch, self.local_size)
+            global_size = current_batch
             limbs = _int_to_uint32_limbs(current)
 
-            event = self.kernel(
-                self.queue,
-                (global_size,),
-                (self.local_size,),
-                np.uint32(limbs[0]),
-                np.uint32(limbs[1]),
-                np.uint32(limbs[2]),
-                np.uint32(limbs[3]),
-                np.uint32(limbs[4]),
-                np.uint32(limbs[5]),
-                np.uint32(limbs[6]),
-                np.uint32(limbs[7]),
-                np.uint64(current_batch),
-                target_hash_buf,
-                proof_hash_buf,
-                found_flags.data,
-                found_keys.data,
-            )
-            event.wait()
+            try:
+                event = self.kernel(
+                    self.queue,
+                    (global_size,),
+                    None if self.local_size is None else (self.local_size,),
+                    np.uint32(limbs[0]),
+                    np.uint32(limbs[1]),
+                    np.uint32(limbs[2]),
+                    np.uint32(limbs[3]),
+                    np.uint32(limbs[4]),
+                    np.uint32(limbs[5]),
+                    np.uint32(limbs[6]),
+                    np.uint32(limbs[7]),
+                    np.uint64(current_batch),
+                    target_hash_buf,
+                    proof_hash_buf,
+                    found_flags.data,
+                    found_keys.data,
+                )
+                event.wait()
+            except (cl.RuntimeError, cl.MemoryError, cl.LogicError) as exc:
+                raise OpenCLScannerError(
+                    "OpenCL kernel execution failed "
+                    f"(batch_size={current_batch}, global_size={global_size}, "
+                    f"device={self.device.name}): {exc}"
+                ) from exc
             scanned += current_batch
 
-            flags = found_flags.get()
-            key_words = found_keys.get()
+            try:
+                flags = found_flags.get()
+                key_words = found_keys.get()
+            except (cl.RuntimeError, cl.MemoryError, cl.LogicError) as exc:
+                raise OpenCLScannerError(f"Failed to read OpenCL results: {exc}") from exc
             for index, is_found in enumerate(flags):
                 if not is_found:
                     continue
@@ -197,9 +235,8 @@ class OpenCLScanner:
                         proof_private_keys_hex=dict(proof_map),
                     )
                 )
-            if target_private_key or len(proof_map) == 6:
-                if len(proof_map) == 6 or target_private_key:
-                    break
+            if target_private_key:
+                break
 
         return ScanResult(
             scanned=scanned,
@@ -224,6 +261,7 @@ class OpenCLScanner:
         prefer_gpu: bool,
         platform_hint: Optional[str],
         device_hint: Optional[str],
+        forced_device_type: Optional[int] = None,
     ) -> tuple[cl.Platform, cl.Device]:
         matches: list[tuple[int, cl.Platform, cl.Device]] = []
         for platform in cl.get_platforms():
@@ -232,9 +270,13 @@ class OpenCLScanner:
             for device in platform.get_devices():
                 if device_hint and device_hint.lower() not in device.name.lower():
                     continue
+                if forced_device_type and not (device.type & forced_device_type):
+                    continue
                 is_gpu = bool(device.type & cl.device_type.GPU)
                 is_cpu = bool(device.type & cl.device_type.CPU)
                 score = device.max_compute_units
+                if forced_device_type:
+                    score += 20_000
                 if prefer_gpu and is_gpu:
                     score += 10_000
                 elif is_cpu:
@@ -242,9 +284,32 @@ class OpenCLScanner:
                 matches.append((score, platform, device))
 
         if not matches:
-            raise OpenCLScannerError("No OpenCL devices found")
+            device_kind = cl.device_type.to_string(forced_device_type) if forced_device_type else "any"
+            raise OpenCLScannerError(f"No OpenCL devices found for type {device_kind}")
         _, platform, device = max(matches, key=lambda item: item[0])
         return platform, device
+
+    def _resolve_local_size(self, local_size: Optional[int]) -> Optional[int]:
+        """Return a work-group size compatible with Apple CPU/GPU OpenCL.
+
+        None lets the OpenCL driver choose. That is the safest default on macOS,
+        especially for the Apple CPU driver, which can reject fixed sizes with
+        INVALID_WORK_GROUP_SIZE.
+        """
+
+        if local_size is None:
+            return None
+
+        if local_size <= 0:
+            raise ValueError("local_size must be positive or None")
+
+        max_work_group_size = int(self.device.max_work_group_size)
+        resolved = min(local_size, max_work_group_size)
+
+        if self.device.type & cl.device_type.CPU:
+            return resolved if resolved in (1, 64) else None
+
+        return resolved
 
 
 def address_to_hash160(address: str) -> bytes:
@@ -296,7 +361,3 @@ def _int_to_uint32_limbs(value: int) -> list[int]:
 
 def _uint32_limbs_to_hex(words) -> str:
     return "".join(f"{int(word):08x}" for word in words)
-
-
-def _round_up(value: int, multiple: int) -> int:
-    return ((value + multiple - 1) // multiple) * multiple

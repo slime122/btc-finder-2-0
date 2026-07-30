@@ -1,26 +1,11 @@
 {
-  "name": "btc",
-  "version": "1.0.0",
-  "description": "",
-  "main": "src/main.js",
+  "name": "btc-finder-2-0",
+  "version": "2.0.0",
+  "description": "BTC Puzzle Worker para macOS / Linux / Windows",
+  "main": "main.py",
   "scripts": {
-    "start": "node src/main.js"
-  },
-  "type": "module",
-  "author": "",
-  "license": "ISC",
-  "dependencies": {
-    "chalk": "^5.3.0",
-    "coinkey": "^3.0.0",
-    "axios": "^1.7.2",
-    "coinkey": "^3.0.0",
-    "ejs": "^3.1.10",
-    "express": "^4.19.2",
-    "express-basic-auth": "^1.2.1",
-    "node-fetch": "^3.3.2",
-    "nodemon": "^3.1.4",
-    "postcss": "^8.4.38",
-    "socket.io": "^4.7.5",
-    "tailwindcss": "^3.4.4"
+    "start": "python3 main.py",
+    "start:cpu": "python3 main.py --no-web --puzzle 71 --cpu",
+    "test:p38": "python3 main.py --no-web --puzzle 38 --batch-size 256"
   }
 }

@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BTC Finder 2.0</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #101114;
+        --panel: #181a20;
+        --panel-2: #20232b;
+        --line: #30343f;
+        --text: #f4f6fb;
+        --muted: #9aa3b2;
+        --accent: #38bdf8;
+        --ok: #22c55e;
+        --warn: #f59e0b;
+        --danger: #ef4444;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+
+      .shell {
+        display: grid;
+        grid-template-columns: minmax(300px, 380px) 1fr;
+        gap: 16px;
+        width: min(1440px, 100%);
+        min-height: 100vh;
+        margin: 0 auto;
+        padding: 16px;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+
+      .config {
+        padding: 18px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 18px;
+      }
+
+      h1,
+      h2 {
+        margin: 0;
+        letter-spacing: 0;
+      }
+
+      h1 {
+        font-size: 22px;
+      }
+
+      h2 {
+        font-size: 15px;
+        color: var(--muted);
+        font-weight: 600;
+      }
+
+      .badge {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 5px 9px;
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .field {
+        display: grid;
+        gap: 7px;
+        margin: 14px 0;
+      }
+
+      label {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      input,
+      select {
+        width: 100%;
+        min-height: 42px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #111318;
+        color: var(--text);
+        padding: 0 11px;
+        outline: none;
+      }
+
+      input:focus,
+      select:focus {
+        border-color: var(--accent);
+      }
+
+      .hardware {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+
+      .choice {
+        min-height: 44px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--panel-2);
+        color: var(--text);
+        cursor: pointer;
+      }
+
+      .choice.active {
+        border-color: var(--accent);
+        color: #dff6ff;
+        box-shadow: inset 0 0 0 1px var(--accent);
+      }
+
+      .slider-row {
+        display: grid;
+        grid-template-columns: 1fr 82px;
+        gap: 10px;
+        align-items: center;
+      }
+
+      input[type="range"] {
+        padding: 0;
+      }
+
+      .hint {
+        color: var(--muted);
+        font-size: 12px;
+        min-height: 18px;
+      }
+
+      .hint.warn {
+        color: #fbbf24;
+      }
+
+      .start {
+        width: 100%;
+        height: 74px;
+        margin-top: 18px;
+        border: 0;
+        border-radius: 8px;
+        background: var(--ok);
+        color: #05110a;
+        font-size: 26px;
+        font-weight: 800;
+        cursor: pointer;
+      }
+
+      .start.running {
+        background: var(--danger);
+        color: #fff7f7;
+      }
+
+      .dashboard {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        gap: 16px;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .metric {
+        min-height: 100px;
+        padding: 16px;
+      }
+
+      .metric .label {
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: uppercase;
+      }
+
+      .metric .value {
+        margin-top: 10px;
+        font-size: 24px;
+        font-weight: 750;
+        overflow-wrap: anywhere;
+      }
+
+      .metric .sub {
+        margin-top: 7px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .terminal-wrap {
+        min-height: 0;
+        display: grid;
+        grid-template-rows: auto 1fr;
+      }
+
+      .terminal-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 13px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .terminal {
+        margin: 0;
+        min-height: 420px;
+        max-height: calc(100vh - 190px);
+        overflow: auto;
+        padding: 16px;
+        background: #090b0f;
+        color: #c6f6d5;
+        font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        white-space: pre-wrap;
+      }
+
+      .status-dot {
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--warn);
+        margin-right: 7px;
+      }
+
+      .status-dot.running {
+        background: var(--ok);
+      }
+
+      @media (max-width: 920px) {
+        .shell {
+          grid-template-columns: 1fr;
+        }
+
+        .metrics {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 520px) {
+        .shell {
+          padding: 10px;
+        }
+
+        .metrics {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel config">
+        <div class="brand">
+          <div>
+            <h1>BTC Finder 2.0</h1>
+            <h2>BTC Puzzle Worker</h2>
+          </div>
+          <span class="badge" id="socketBadge">WS</span>
+        </div>
+
+        <div class="field">
+          <label for="token">UserToken</label>
+          <input id="token" type="password" autocomplete="off" placeholder="Token da pool" />
+        </div>
+
+        <div class="field">
+          <label for="worker">WorkerName</label>
+          <input id="worker" maxlength="15" value="macbook" />
+        </div>
+
+        <div class="field">
+          <label for="puzzle">Puzzle</label>
+          <input id="puzzle" type="number" min="1" value="71" />
+        </div>
+
+        <div class="field">
+          <label>Hardware</label>
+          <div class="hardware">
+            <button class="choice" id="gpuBtn" type="button">GPU Intel Iris</button>
+            <button class="choice active" id="cpuBtn" type="button">CPU Intel i5</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="batch">Batch Size</label>
+          <div class="slider-row">
+            <input id="batch" type="range" min="128" max="8192" step="128" value="4096" />
+            <input id="batchNumber" type="number" min="0" max="65536" step="128" value="4096" />
+          </div>
+          <div class="hint" id="batchHint">CPU Intel i5: 4096 ou 8192.</div>
+        </div>
+
+        <button class="start" id="startStop" type="button">START</button>
+      </section>
+
+      <section class="dashboard">
+        <div class="metrics">
+          <article class="panel metric">
+            <div class="label">Status</div>
+            <div class="value"><span class="status-dot" id="statusDot"></span><span id="status">Idle</span></div>
+            <div class="sub" id="device">-</div>
+          </article>
+          <article class="panel metric">
+            <div class="label">Velocidade</div>
+            <div class="value" id="speed">0 keys/s</div>
+            <div class="sub" id="scanned">0 chaves</div>
+          </article>
+          <article class="panel metric">
+            <div class="label">Range HEX</div>
+            <div class="value" id="hex">-</div>
+            <div class="sub" id="puzzleLabel">Puzzle 71</div>
+          </article>
+          <article class="panel metric">
+            <div class="label">Proof of Work</div>
+            <div class="value" id="pow">0 / 6</div>
+            <div class="sub" id="batchLabel">Batch 4096</div>
+          </article>
+        </div>
+
+        <article class="panel terminal-wrap">
+          <div class="terminal-head">
+            <h2>API / Worker Log</h2>
+            <span class="badge" id="runningBadge">Idle</span>
+          </div>
+          <pre class="terminal" id="terminal"></pre>
+        </article>
+      </section>
+    </main>
+
+    <script>
+      const state = {
+        hardware: "cpu",
+        running: false,
+      };
+
+      const el = (id) => document.getElementById(id);
+      const gpuBtn = el("gpuBtn");
+      const cpuBtn = el("cpuBtn");
+      const batch = el("batch");
+      const batchNumber = el("batchNumber");
+      const startStop = el("startStop");
+
+      function setHardware(hardware) {
+        state.hardware = hardware;
+        gpuBtn.classList.toggle("active", hardware === "gpu");
+        cpuBtn.classList.toggle("active", hardware === "cpu");
+        if (hardware === "gpu") {
+          batch.value = "256";
+          batchNumber.value = "256";
+          el("batchHint").textContent = "GPU em coordenadas afins requer batch pequeno (128-256).";
+          el("batchHint").classList.add("warn");
+        } else {
+          batch.value = "4096";
+          batchNumber.value = "4096";
+          el("batchHint").textContent = "CPU Intel i5: 4096 ou 8192.";
+          el("batchHint").classList.remove("warn");
+        }
+      }
+
+      gpuBtn.addEventListener("click", () => setHardware("gpu"));
+      cpuBtn.addEventListener("click", () => setHardware("cpu"));
+      batch.addEventListener("input", () => {
+        batchNumber.value = batch.value;
+        if (state.hardware === "gpu" && Number(batch.value) > 512) {
+          el("batchHint").textContent = "O backend limitará GPU no macOS para 256 se passar de 512.";
+          el("batchHint").classList.add("warn");
+        }
+      });
+      batchNumber.addEventListener("input", () => {
+        const value = Math.max(0, Math.min(65536, Number(batchNumber.value || 0)));
+        batch.value = Math.max(128, Math.min(8192, value));
+      });
+
+      async function startWorker() {
+        const payload = {
+          user_token: el("token").value.trim(),
+          worker_name: el("worker").value.trim() || "macbook",
+          puzzle_code: Number(el("puzzle").value || 71),
+          hardware: state.hardware,
+          batch_size: Number(batchNumber.value || 0),
+        };
+        if (!payload.user_token) {
+          alert("Informe o UserToken.");
+          return;
+        }
+        const response = await fetch("/api/start", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+          alert(await response.text());
+        }
+      }
+
+      async function stopWorker() {
+        await fetch("/api/stop", { method: "POST" });
+      }
+
+      startStop.addEventListener("click", () => {
+        if (state.running) {
+          stopWorker();
+        } else {
+          startWorker();
+        }
+      });
+
+      function render(payload) {
+        state.running = Boolean(payload.running);
+        const speed = Number(payload.speed ?? payload.speed_keys_s ?? 0);
+        const progress = Math.max(0, Math.min(1, Number(payload.progress || 0)));
+        const proofsFound = Number(payload.proofs_found ?? payload.pow_found ?? 0);
+        startStop.textContent = state.running ? "STOP" : "START";
+        startStop.classList.toggle("running", state.running);
+        el("status").textContent = payload.status || "Idle";
+        el("statusDot").classList.toggle("running", state.running);
+        el("device").textContent = payload.device_name || "-";
+        el("speed").textContent = formatSpeed(speed);
+        el("scanned").textContent = `${Number(payload.scanned || 0).toLocaleString()} chaves · ${(progress * 100).toFixed(2)}%`;
+        el("hex").textContent = payload.current_hex || "-";
+        el("puzzleLabel").textContent = `Puzzle ${payload.puzzle_code || 71}`;
+        el("pow").textContent = `${proofsFound} / 6`;
+        el("batchLabel").textContent = `Batch ${payload.batch_size || batchNumber.value}`;
+        el("runningBadge").textContent = payload.running ? "Running" : "Idle";
+        const lines = payload.logs || [];
+        el("terminal").textContent = lines.join("\n");
+        el("terminal").scrollTop = el("terminal").scrollHeight;
+      }
+
+      function formatSpeed(keysPerSecond) {
+        if (keysPerSecond >= 1_000_000) {
+          return `${(keysPerSecond / 1_000_000).toFixed(2)} Mkeys/s`;
+        }
+        if (keysPerSecond >= 1_000) {
+          return `${(keysPerSecond / 1_000).toFixed(0)} Kkeys/s`;
+        }
+        return `${keysPerSecond.toFixed(0)} keys/s`;
+      }
+
+      function connectSocket() {
+        const proto = window.location.protocol === "https:" ? "wss" : "ws";
+        const socket = new WebSocket(`${proto}://${window.location.host}/ws`);
+        socket.onopen = () => (el("socketBadge").textContent = "WS online");
+        socket.onclose = () => {
+          el("socketBadge").textContent = "WS reconnect";
+          setTimeout(connectSocket, 1000);
+        };
+        socket.onmessage = (event) => render(JSON.parse(event.data));
+      }
+
+      connectSocket();
+    </script>
+  </body>
+</html>

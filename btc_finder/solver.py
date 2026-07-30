@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from .api import BTCPuzzleAPI
-from .opencl_kernel import OpenCLScanner, ScanRequest, ScanResult
+from .opencl_kernel import DEFAULT_BATCH_SIZE, OpenCLScanner, ScanRequest, ScanResult
 
 
 FOUND_KEY_PATH = Path("FOUND_KEY.txt")
@@ -19,7 +19,7 @@ FOUND_KEY_PATH = Path("FOUND_KEY.txt")
 @dataclass(frozen=True)
 class SolverConfig:
     puzzle_code: int = 71
-    batch_size: int = 1_048_576
+    batch_size: int = DEFAULT_BATCH_SIZE
     ping_interval_seconds: int = 150
     sleep_between_ranges_seconds: float = 2.0
     gpu_count: int = 1
@@ -67,10 +67,19 @@ class PuzzleSolver:
 
             ping_thread, ping_stop_event = self._start_ping_thread(workload.hex)
             last_print = 0.0
+            last_scanned = 0
+            last_sample_time = time.monotonic()
 
             def progress(result: ScanResult) -> None:
-                nonlocal last_print
+                nonlocal last_print, last_sample_time, last_scanned
                 now = time.monotonic()
+                sample_elapsed = now - last_sample_time
+                scanned_delta = result.scanned - last_scanned
+                if sample_elapsed <= 0:
+                    return
+                speed = scanned_delta / sample_elapsed
+                last_sample_time = now
+                last_scanned = result.scanned
                 if now - last_print < 1.0:
                     return
                 last_print = now
@@ -78,7 +87,7 @@ class PuzzleSolver:
                 print(
                     "\r"
                     f"Escaneadas: {result.scanned:,} | "
-                    f"{result.mkeys_per_second:.3f} Mkeys/s | "
+                    f"{_format_speed(speed)} | "
                     f"PoW: {proof_found}/6",
                     end="",
                     flush=True,
@@ -162,3 +171,11 @@ class PuzzleSolver:
         print(f"Private key HEX: {private_key_hex}")
         print(f"Arquivo salvo: {FOUND_KEY_PATH.resolve()}")
         print("=" * 72)
+
+
+def _format_speed(keys_per_second: float) -> str:
+    if keys_per_second >= 1_000_000:
+        return f"{keys_per_second / 1_000_000:.3f} Mkeys/s"
+    if keys_per_second >= 1_000:
+        return f"{keys_per_second / 1_000:.3f} Kkeys/s"
+    return f"{keys_per_second:.0f} keys/s"
