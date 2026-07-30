@@ -202,7 +202,7 @@ class WorkerController:
                 self._state.speed_keys_s = 0.0
                 self._state.proofs_found = 0
                 self._state.pow_found = 0
-            elif event_type == "metrics":
+            elif event_type in ("metrics", "stats"):
                 speed = float(event.get("speed", 0.0))
                 progress = float(event.get("progress", 0.0))
                 proofs = int(event.get("proofs_found", 0))
@@ -252,7 +252,7 @@ def _worker_process_main(
 ) -> None:
     try:
         from .api import BTCPuzzleAPI
-        from .opencl_kernel import OpenCLScanner, ScanRequest, ScanResult
+        from .opencl_kernel import OpenCLScanner, OpenCLScannerError, ScanRequest, ScanResult
 
         request = StartRequest(**request_data)
         _emit(event_queue, "status", status="Initializing OpenCL")
@@ -280,6 +280,15 @@ def _worker_process_main(
         )
         _emit(event_queue, "log", message=f"Batch size: {batch_size}")
 
+        _emit(
+            event_queue,
+            "stats",
+            scanned=0,
+            speed=0.1,
+            progress=0.0,
+            proofs_found=0,
+        )
+
         api = BTCPuzzleAPI(
             user_token=request.user_token,
             worker_name=request.worker_name,
@@ -305,6 +314,14 @@ def _worker_process_main(
                 ),
             )
             _emit(event_queue, "status", status="Running")
+            _emit(
+                event_queue,
+                "stats",
+                scanned=0,
+                speed=0.1,
+                progress=0.0,
+                proofs_found=0,
+            )
 
             ping_stop = threading.Event()
             ping_thread = threading.Thread(
@@ -314,24 +331,14 @@ def _worker_process_main(
             )
             ping_thread.start()
 
-            last_scanned = 0
-            last_sample_time = time.monotonic()
-
             def progress_callback(result: ScanResult) -> None:
-                nonlocal last_scanned, last_sample_time
-                now = time.monotonic()
-                elapsed = max(now - last_sample_time, 1e-9)
-                scanned_delta = max(result.scanned - last_scanned, 0)
-                speed = scanned_delta / elapsed
-                last_scanned = result.scanned
-                last_sample_time = now
                 proofs_found = len(result.proof_private_keys_hex or {})
                 progress = result.scanned / workload.key_count if workload.key_count else 0.0
                 _emit(
                     event_queue,
-                    "metrics",
+                    "stats",
                     scanned=result.scanned,
-                    speed=speed,
+                    speed=result.current_speed_keys_s or result.keys_per_second or 0.1,
                     progress=progress,
                     proofs_found=proofs_found,
                 )
@@ -348,6 +355,10 @@ def _worker_process_main(
                     progress_callback=progress_callback,
                     stop_event=stop_event,
                 )
+            except OpenCLScannerError as exc:
+                _emit(event_queue, "error", message=f"OpenCL fail: {exc}")
+                _emit(event_queue, "log", message=f"[ERROR] OpenCL fail: {exc}")
+                sys.exit(1)
             finally:
                 ping_stop.set()
                 ping_thread.join(timeout=0.2)
@@ -384,10 +395,12 @@ def _worker_process_main(
             _emit(event_queue, "log", message=f"PUT response: {response}")
 
         _emit(event_queue, "status", status="Idle")
+    except SystemExit:
+        raise
     except BaseException as exc:
         _emit(event_queue, "error", message=f"{type(exc).__name__}: {exc}")
         _emit(event_queue, "log", message=f"ERROR: {type(exc).__name__}: {exc}")
-        raise
+        sys.exit(1)
 
 
 def _ping_loop(

@@ -67,23 +67,15 @@ class PuzzleSolver:
 
             ping_thread, ping_stop_event = self._start_ping_thread(workload.hex)
             last_print = 0.0
-            last_scanned = 0
-            last_sample_time = time.monotonic()
 
             def progress(result: ScanResult) -> None:
-                nonlocal last_print, last_sample_time, last_scanned
+                nonlocal last_print
                 now = time.monotonic()
-                sample_elapsed = now - last_sample_time
-                scanned_delta = result.scanned - last_scanned
-                if sample_elapsed <= 0:
-                    return
-                speed = scanned_delta / sample_elapsed
-                last_sample_time = now
-                last_scanned = result.scanned
                 if now - last_print < 1.0:
                     return
                 last_print = now
                 proof_found = len(result.proof_private_keys_hex or {})
+                speed = result.current_speed_keys_s or result.keys_per_second
                 print(
                     "\r"
                     f"Escaneadas: {result.scanned:,} | "

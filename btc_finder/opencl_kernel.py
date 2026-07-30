@@ -45,6 +45,9 @@ class ScanRequest:
 class ScanResult:
     scanned: int = 0
     elapsed_seconds: float = 0.0
+    batch_scanned: int = 0
+    batch_elapsed_seconds: float = 0.0
+    current_speed_keys_s: float = 0.0
     target_private_key_hex: Optional[str] = None
     proof_private_keys_hex: dict[str, str] | None = None
 
@@ -89,7 +92,9 @@ class OpenCLScanner:
             self.program = self._build_program()
             self.kernel = cl.Kernel(self.program, "scan_range")
         except (cl.RuntimeError, cl.MemoryError, cl.LogicError) as exc:
-            raise OpenCLScannerError(f"Failed to initialize OpenCL scanner: {exc}") from exc
+            raise OpenCLScannerError(
+                f"Failed to initialize OpenCL scanner ({self.kernel_path}): {exc}"
+            ) from exc
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -173,6 +178,17 @@ class OpenCLScanner:
         target_private_key: Optional[str] = None
         scanned = 0
         started = time.perf_counter()
+        if progress_callback:
+            progress_callback(
+                ScanResult(
+                    scanned=0,
+                    elapsed_seconds=0.0,
+                    batch_scanned=0,
+                    batch_elapsed_seconds=0.0,
+                    current_speed_keys_s=0.1,
+                    proof_private_keys_hex={},
+                )
+            )
 
         while scanned < max_keys:
             if stop_event and stop_event.is_set():
@@ -182,6 +198,7 @@ class OpenCLScanner:
             current_batch = min(batch_size, max_keys - scanned)
             global_size = current_batch
             limbs = _int_to_uint32_limbs(current)
+            batch_started = time.perf_counter()
 
             try:
                 event = self.kernel(
@@ -209,6 +226,7 @@ class OpenCLScanner:
                     f"(batch_size={current_batch}, global_size={global_size}, "
                     f"device={self.device.name}): {exc}"
                 ) from exc
+            batch_elapsed = max(time.perf_counter() - batch_started, 1e-9)
             scanned += current_batch
 
             try:
@@ -226,11 +244,15 @@ class OpenCLScanner:
                     proof_map[request.proof_addresses[index - 1]] = key_hex
 
             elapsed = time.perf_counter() - started
+            current_speed = current_batch / batch_elapsed
             if progress_callback:
                 progress_callback(
                     ScanResult(
                         scanned=scanned,
                         elapsed_seconds=elapsed,
+                        batch_scanned=current_batch,
+                        batch_elapsed_seconds=batch_elapsed,
+                        current_speed_keys_s=current_speed,
                         target_private_key_hex=target_private_key,
                         proof_private_keys_hex=dict(proof_map),
                     )
@@ -250,9 +272,23 @@ class OpenCLScanner:
             raise OpenCLScannerError(f"Kernel file not found: {self.kernel_path}")
         source = self.kernel_path.read_text(encoding="utf-8")
         try:
-            return cl.Program(self.context, source).build(
+            program = cl.Program(self.context, source).build(
                 options=["-cl-std=CL1.2", "-Werror"]
             )
+            return program
+        except cl.RuntimeError as exc:
+            build_log = ""
+            if hasattr(exc, "build_log") and self.device:
+                try:
+                    build_log = exc.build_log.get(self.device, "")
+                except Exception:
+                    pass
+            detail = str(exc)
+            if build_log:
+                detail = f"{exc} | build log: {build_log[:500]}"
+            raise OpenCLScannerError(
+                f"Failed to build OpenCL kernel: {detail}"
+            ) from exc
         except Exception as exc:
             raise OpenCLScannerError(f"Failed to build OpenCL kernel: {exc}") from exc
 

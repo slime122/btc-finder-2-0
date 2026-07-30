@@ -3,11 +3,11 @@
 // Conservative implementation for Apple OpenCL / Intel integrated GPUs:
 // - 256-bit field values are 8 uint words, big-endian.
 // - Field multiplication uses modular double-and-add to avoid 512-bit temporaries.
-// - Scalar multiplication uses affine double-and-add with Fermat inversions.
+// - Scalar multiplication uses Jacobian double-and-add with one final inversion.
 //
 // This is intentionally correctness-first. It is suitable as the real crypto
-// baseline for the Python pipeline; the next performance step is replacing
-// affine multiplication with Jacobian/windowed multiplication.
+// baseline for the Python pipeline; the next performance step is fixed-window
+// multiplication with a precomputed table of G.
 
 #define U32_MAXV 0xffffffffU
 
@@ -154,6 +154,27 @@ inline void fp_double(uint r[8], const uint a[8]) {
     fp_add(r, a, a);
 }
 
+inline void fp_mul_small(uint r[8], const uint a[8], uint n) {
+    uint acc[8];
+    uint base[8];
+    u256_zero(acc);
+    u256_copy(base, a);
+    while (n > 0U) {
+        if (n & 1U) {
+            uint tmp[8];
+            fp_add(tmp, acc, base);
+            u256_copy(acc, tmp);
+        }
+        n >>= 1U;
+        if (n > 0U) {
+            uint dbl[8];
+            fp_double(dbl, base);
+            u256_copy(base, dbl);
+        }
+    }
+    u256_copy(r, acc);
+}
+
 inline int u256_get_bit(const uint a[8], int bit_index) {
     int word = 7 - (bit_index >> 5);
     int shift = bit_index & 31;
@@ -166,23 +187,64 @@ inline int p_minus_2_get_bit(int bit_index) {
     return (int)((FIELD_P_MINUS_2[word] >> shift) & 1U);
 }
 
-inline void fp_mul(uint r[8], const uint a_in[8], const uint b_in[8]) {
-    uint acc[8];
-    uint a[8];
-    u256_zero(acc);
-    u256_copy(a, a_in);
-
-    for (int bit = 0; bit < 256; bit++) {
-        if (u256_get_bit(b_in, bit)) {
-            uint tmp[8];
-            fp_add(tmp, acc, a);
-            u256_copy(acc, tmp);
-        }
-        uint dbl[8];
-        fp_double(dbl, a);
-        u256_copy(a, dbl);
+inline void fp_mul(uint r[8], const uint a[8], const uint b[8]) {
+    uint a_le[8], b_le[8];
+    for (int i = 0; i < 8; i++) {
+        a_le[i] = a[7 - i];
+        b_le[i] = b[7 - i];
     }
-    u256_copy(r, acc);
+
+    uint p[16];
+    for (int i = 0; i < 16; i++) p[i] = 0U;
+
+    for (int i = 0; i < 8; i++) {
+        ulong carry = 0UL;
+        uint ai = a_le[i];
+        for (int j = 0; j < 8; j++) {
+            ulong prod = (ulong)ai * (ulong)b_le[j] + (ulong)p[i + j] + carry;
+            p[i + j] = (uint)(prod & 0xFFFFFFFFUL);
+            carry = prod >> 32;
+        }
+        p[i + 8] = (uint)carry;
+    }
+
+    ulong carry = 0UL;
+    for (int i = 0; i < 8; i++) {
+        ulong v = (ulong)p[i] + carry;
+        if (i > 0) v += (ulong)p[i + 7];
+        v += (ulong)p[i + 8] * 0x3D1UL;
+        p[i] = (uint)(v & 0xFFFFFFFFUL);
+        carry = v >> 32;
+    }
+    carry += (ulong)p[15];
+
+    if (carry > 0UL) {
+        ulong overflow = carry;
+        carry = 0UL;
+        ulong c977 = overflow * 0x3D1UL;
+        for (int i = 0; i < 8; i++) {
+            ulong v = (ulong)p[i] + (c977 & 0xFFFFFFFFUL) + carry;
+            p[i] = (uint)(v & 0xFFFFFFFFUL);
+            carry = v >> 32;
+            c977 >>= 32;
+        }
+        ulong v = (ulong)p[1] + overflow + carry;
+        p[1] = (uint)(v & 0xFFFFFFFFUL);
+        carry = v >> 32;
+        for (int i = 2; i < 8 && carry > 0UL; i++) {
+            v = (ulong)p[i] + carry;
+            p[i] = (uint)(v & 0xFFFFFFFFUL);
+            carry = v >> 32;
+        }
+    }
+
+    for (int i = 0; i < 8; i++) r[i] = p[7 - i];
+
+    if (u256_cmp_p(r) >= 0) {
+        uint tmp[8];
+        u256_sub_p(tmp, r);
+        for (int i = 0; i < 8; i++) r[i] = tmp[i];
+    }
 }
 
 inline void fp_square(uint r[8], const uint a[8]) {
@@ -209,112 +271,144 @@ inline void fp_inv(uint r[8], const uint a[8]) {
     u256_copy(r, result);
 }
 
-inline void point_set_g(uint x[8], uint y[8], int *inf) {
+inline void point_set_g_affine(uint x[8], uint y[8]) {
     for (int i = 0; i < 8; i++) {
         x[i] = GX[i];
         y[i] = GY[i];
     }
-    *inf = 0;
 }
 
-inline void point_double(uint rx[8], uint ry[8], int *rinf,
-                         const uint x[8], const uint y[8], int inf) {
+inline void point_double_jac(uint rx[8], uint ry[8], uint rz[8], int *rinf,
+                             const uint x[8], const uint y[8], const uint z[8], int inf) {
     if (inf || u256_is_zero(y)) {
         u256_zero(rx);
         u256_zero(ry);
+        u256_zero(rz);
         *rinf = 1;
         return;
     }
 
-    uint x2[8], three_x2[8], two_y[8], inv[8], lambda[8];
-    uint lambda2[8], two_x[8], x3[8], x_minus_x3[8], y3[8], tmp[8];
+    uint xx[8], yy[8], yyyy[8], x_plus_yy[8], tmp[8], s[8], m[8], t[8];
+    uint two_s[8], eight_yyyy[8], s_minus_t[8], y3[8], z3[8];
 
-    fp_square(x2, x);
-    fp_add(tmp, x2, x2);
-    fp_add(three_x2, tmp, x2);
-    fp_double(two_y, y);
-    fp_inv(inv, two_y);
-    fp_mul(lambda, three_x2, inv);
+    fp_square(xx, x);                // XX = X1^2
+    fp_square(yy, y);                // YY = Y1^2
+    fp_square(yyyy, yy);             // YYYY = YY^2
+    fp_add(x_plus_yy, x, yy);
+    fp_square(tmp, x_plus_yy);
+    fp_sub(tmp, tmp, xx);
+    fp_sub(tmp, tmp, yyyy);
+    fp_double(s, tmp);               // S = 2*((X1+YY)^2-XX-YYYY)
+    fp_mul_small(m, xx, 3U);         // M = 3*XX, a=0 for secp256k1
+    fp_square(t, m);
+    fp_double(two_s, s);
+    fp_sub(t, t, two_s);             // T = M^2 - 2*S
 
-    fp_square(lambda2, lambda);
-    fp_double(two_x, x);
-    fp_sub(x3, lambda2, two_x);
-    fp_sub(x_minus_x3, x, x3);
-    fp_mul(tmp, lambda, x_minus_x3);
-    fp_sub(y3, tmp, y);
+    fp_sub(s_minus_t, s, t);
+    fp_mul(tmp, m, s_minus_t);
+    fp_mul_small(eight_yyyy, yyyy, 8U);
+    fp_sub(y3, tmp, eight_yyyy);
+    fp_mul(tmp, y, z);
+    fp_double(z3, tmp);              // Z3 = 2*Y1*Z1
 
-    u256_copy(rx, x3);
+    u256_copy(rx, t);
     u256_copy(ry, y3);
+    u256_copy(rz, z3);
     *rinf = 0;
 }
 
-inline void point_add(uint rx[8], uint ry[8], int *rinf,
-                      const uint x1[8], const uint y1[8], int inf1,
-                      const uint x2[8], const uint y2[8], int inf2) {
+inline void point_add_mixed_jac(uint rx[8], uint ry[8], uint rz[8], int *rinf,
+                                const uint x1[8], const uint y1[8], const uint z1[8], int inf1,
+                                const uint x2[8], const uint y2[8]) {
     if (inf1) {
         u256_copy(rx, x2);
         u256_copy(ry, y2);
-        *rinf = inf2;
-        return;
-    }
-    if (inf2) {
-        u256_copy(rx, x1);
-        u256_copy(ry, y1);
-        *rinf = inf1;
+        u256_zero(rz);
+        rz[7] = 1U;
+        *rinf = 0;
         return;
     }
 
-    if (u256_cmp(x1, x2) == 0) {
-        if (u256_cmp(y1, y2) == 0) {
-            point_double(rx, ry, rinf, x1, y1, inf1);
+    uint z1z1[8], u2[8], z1_cubed[8], s2[8], h[8], r[8];
+    fp_square(z1z1, z1);
+    fp_mul(u2, x2, z1z1);
+    fp_mul(z1_cubed, z1z1, z1);
+    fp_mul(s2, y2, z1_cubed);
+    fp_sub(h, u2, x1);
+    fp_sub(r, s2, y1);
+
+    if (u256_is_zero(h)) {
+        if (u256_is_zero(r)) {
+            point_double_jac(rx, ry, rz, rinf, x1, y1, z1, inf1);
         } else {
             u256_zero(rx);
             u256_zero(ry);
+            u256_zero(rz);
             *rinf = 1;
         }
         return;
     }
 
-    uint dy[8], dx[8], inv[8], lambda[8], lambda2[8], x3[8], y3[8], tmp[8];
-    fp_sub(dy, y2, y1);
-    fp_sub(dx, x2, x1);
-    fp_inv(inv, dx);
-    fp_mul(lambda, dy, inv);
-    fp_square(lambda2, lambda);
-    fp_sub(tmp, lambda2, x1);
-    fp_sub(x3, tmp, x2);
-    fp_sub(tmp, x1, x3);
-    fp_mul(tmp, lambda, tmp);
-    fp_sub(y3, tmp, y1);
+    uint hh[8], hhh[8], v[8], r2[8], two_v[8], x3[8], y3[8], z3[8], tmp[8];
+    fp_square(hh, h);
+    fp_mul(hhh, h, hh);
+    fp_mul(v, x1, hh);
+    fp_square(r2, r);
+    fp_double(two_v, v);
+    fp_sub(tmp, r2, hhh);
+    fp_sub(x3, tmp, two_v);
+    fp_sub(tmp, v, x3);
+    fp_mul(tmp, r, tmp);
+    fp_mul(y3, y1, hhh);
+    fp_sub(y3, tmp, y3);
+    fp_mul(z3, z1, h);
 
     u256_copy(rx, x3);
     u256_copy(ry, y3);
+    u256_copy(rz, z3);
     *rinf = 0;
 }
 
+inline void jacobian_to_affine(uint ax[8], uint ay[8],
+                               const uint x[8], const uint y[8], const uint z[8], int inf) {
+    if (inf) {
+        u256_zero(ax);
+        u256_zero(ay);
+        return;
+    }
+
+    uint zinv[8], zinv2[8], zinv3[8];
+    fp_inv(zinv, z);                 // The only inversion in scalar multiplication.
+    fp_square(zinv2, zinv);
+    fp_mul(zinv3, zinv2, zinv);
+    fp_mul(ax, x, zinv2);
+    fp_mul(ay, y, zinv3);
+}
+
 inline void scalar_mul_g(uint rx[8], uint ry[8], int *rinf, const uint k[8]) {
-    uint qx[8], qy[8], tx[8], ty[8];
+    uint qx[8], qy[8], qz[8], tx[8], ty[8], tz[8];
+    uint gx[8], gy[8];
     int qinf = 1;
     u256_zero(qx);
     u256_zero(qy);
+    u256_zero(qz);
+    point_set_g_affine(gx, gy);
 
     for (int bit = 255; bit >= 0; bit--) {
-        point_double(tx, ty, &qinf, qx, qy, qinf);
+        point_double_jac(tx, ty, tz, &qinf, qx, qy, qz, qinf);
         u256_copy(qx, tx);
         u256_copy(qy, ty);
+        u256_copy(qz, tz);
 
         if (u256_get_bit(k, bit)) {
-            uint gx[8], gy[8];
-            int ginf;
-            point_set_g(gx, gy, &ginf);
-            point_add(tx, ty, &qinf, qx, qy, qinf, gx, gy, ginf);
+            point_add_mixed_jac(tx, ty, tz, &qinf, qx, qy, qz, qinf, gx, gy);
             u256_copy(qx, tx);
             u256_copy(qy, ty);
+            u256_copy(qz, tz);
         }
     }
 
-    u256_copy(rx, qx);
-    u256_copy(ry, qy);
+    jacobian_to_affine(rx, ry, qx, qy, qz, qinf);
     *rinf = qinf;
 }
 
