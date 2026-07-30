@@ -1,3 +1,5 @@
 node_modules
 *.txt
+!requirements.txt
+FOUND_KEY.txt
 package-lock.json
